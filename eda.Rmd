@@ -1,0 +1,262 @@
+---
+title: "Analyzing Chyrons"
+output: 
+  html_notebook:
+    theme: united
+    toc: yes
+---
+
+## Introduction
+
+From [Third Eye Data](https://archive.org/details/third-eye):
+
+> The TV News Archive's Third Eye project captures the chyrons – or narrative text – that appear on the lower third of TV news screens and turns them into downloadable data and a Twitter feed for research, journalism, online tools, and other projects. At project launch (September 2017) we are collecting chyrons from BBC News, CNN, Fox News, and MSNBC – more than four million collected over just two weeks. Chyrons have public value because:
+>
+>  *  Breaking news often appears on chyrons before TV newscasters begin reporting or video is available, whether it's a hurricane or a breaking political story.
+>  *  Which chyrons a TV news network chooses to display can reveal editorial decisions that can inform public understanding of how news is filtered for different audiences.
+>  *  Providing chyrons as data–and also on Twitter–in near real-time can serve as a alert system, showing how TV news stations are reporting the news. Often the chyrons are ahead of the general conversation on Twitter.
+
+How they did it:
+
+> The work of the Internet Archive's TV architect Tracey Jaquith, the Third Eye project **applies OCR** to the "lower thirds" of TV cable news screens to capture the text that appears there. The chyrons are not captions, which provide the text for what people are saying on screen, but rather are text narrative that accompanies news broadcasts.
+
+We use data from the filtered feed:
+
+> Created in real-time by TV news editors, chyrons sometimes include misspellings. The OCR process also frequently adds another element where text is not rendered correctly, leading to entries that may be garbled. To make sense out of the noise, Jaquith applies algorithms that choose the most representative chyrons from each channel collected over 60-second increments. This cleaned-up feed is what fuels the Twitter bots that post which chyrons are appearing on TV news screens. 
+
+By quickly browsing some samples, I've found that this dataset can be quite noisy because of the deployment of an OCR algorithm. Misspellings are common even in the filtered feed. Let's run some simple analysis and see if how bad the noise affects the analysis.
+
+## Imports
+```{r imports, results="hide", message=FALSE}
+library(data.table)
+library(ggplot2)
+library(ggrepel)
+library(ggthemes)
+library(ggpmisc)
+library(tidyverse)
+library(tidytext)
+library(lubridate)
+library(scales)
+library(DT)
+# library(hrbrthemes)
+# hrbrthemes::import_roboto_condensed()
+```
+
+## Read In Data
+
+Reference:[Reading and combining many tidy data files in R](https://serialmentor.com/blog/2016/6/13/reading-and-combining-many-tidy-data-files-in-R)
+
+```{r, results="hide"}
+files <- dir("/home/rstudio/src/data/", pattern = "2019\\-03\\-.*\\.tsv", full.names=T)
+head(files, 2)
+```
+
+Read the tsv files using data.table:
+
+```{r echo=TRUE}
+dt <- rbindlist(lapply(files, fread, sep="\t", header=F, col.names=c("timestamp", "station", "duration", "id", "text")))
+datatable(head(dt))
+```
+
+Discard the clip id for now:
+
+```{r}
+dt[, id := NULL]
+```
+
+convert timestamp:
+
+```{r output="hide"}
+dt[, timestamp := parse_date_time(timestamp, 'ymd HMS')]
+dt[, date := date(timestamp)]
+```
+
+## Basic Statistics
+
+A day has `60*60*24 = 86400` seconds. But understandably the total duration of chyrons won't sum up to that because of the commercials, the type of the program, or simply the errors of the OCR algorithm.
+
+The sudden drop of total duraion per day for MSNBC around March 24th was probably caused by system outage:
+
+> Data can be affected by temporary collection outages, which typically can last minutes or hours, but rarely more. If you are concerned about a specific time gap in a feed and would like to know if it's the result of an outage, please inquire at tvnews@archive.org.
+
+From the plot we can see that CNN and MSNBC are the more heavy users of chyrons than BBC and Fox News.
+
+```{r  fig.width=8, fig.asp=1}
+dt.dailysum <- dt[, .(cnt=.N, duration=sum(duration)) ,by=c("station", "date")]
+ggplot(dt.dailysum, aes(x = date, y=duration, fill = station)) +
+  geom_bar(stat="identity", show.legend = FALSE) +
+  facet_wrap(~station, ncol = 1, scales = "fixed") +
+  ggtitle("Total Duration per Day (in seconds)") +  theme_fivethirtyeight()
+```
+
+A day has `60*24 = 1440` minutes. That translates to a maximum of 1440 chyron entries per day.
+
+```{r fig.width=8, fig.asp=1}
+ggplot(dt.dailysum, aes(x = date, y=cnt, fill = station)) +
+  geom_bar(stat="identity", show.legend = FALSE) +
+  facet_wrap(~station, ncol = 1, scales = "fixed") +
+  ggtitle("Number of Chyron Entries per Day") +  theme_fivethirtyeight()
+```
+
+## Word Frequency Comparisons
+
+```{r}
+# replace_reg <- "http[s]?://[A-Za-z\\d/\\.]+|&amp;|&lt;|&gt;"
+tidy_chyrons <- dt %>%
+  # mutate(text = str_replace_all(text, replace_reg, "")) %>%
+  unnest_tokens(
+    word, text, token = "words") %>%
+  filter(!word %in% stop_words$word, str_detect(word, "[a-z]"))
+```
+
+The idea of using `stat_dens2d_filter` came from [here](https://github.com/slowkow/ggrepel/issues/17). 
+
+We can see some clear misspellings like "ntrump" and mishandled unicode characters "u00b0" in the plot:
+
+```{r fig.width=8, fig.asp=1, results="hide", fig.keep=TRUE}
+frequency <- tidy_chyrons %>%
+  group_by(station) %>%
+  count(word, sort = TRUE) %>%
+  left_join(tidy_chyrons %>%
+              group_by(station) %>%
+              summarise(total = n())) %>%
+  mutate(freq = n/total)
+
+frequency.spread <- frequency %>%
+  select(station, word, freq) %>%
+  filter(freq > 0.0001) %>%
+  spread(station, freq) %>%
+  # replace_na(list(BBCNEWS=0, FOXNEWSW=0, MSNBCW=0, CNNW=0)) %>%
+  arrange(desc(CNNW), desc(FOXNEWSW))
+
+ggplot(frequency.spread, aes(CNNW, FOXNEWSW, label=word)) +
+  # geom_jitter(
+  #   alpha = 0.1, size = 1.5, width = 0.02, height = 0.02) +
+  geom_point(alpha = 0.1, size = 1.5) +
+  # geom_text(aes(label = word), check_overlap = TRUE, vjust = 0) +
+  stat_dens2d_filter(
+    geom = "text_repel", keep.fraction = 0.1, size=3, 
+    arrow=arrow(angle=15, ends="first", length=unit(0.1, "inches")),
+    direction="both", force=1, min.segment.length=1, point.padding=.01,
+    nudge_y = .01
+  ) + 
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  ggtitle("Word Frequencies: Fox v.s. CNN") +
+  geom_abline(color = "red") + theme_bw()
+```
+
+
+```{r fig.width=8, fig.asp=1}
+ggplot(frequency.spread %>% arrange(desc(BBCNEWS), desc(FOXNEWSW)), aes(BBCNEWS, FOXNEWSW, label=word)) +
+  geom_point(alpha = 0.1, size = 1.5) +
+  stat_dens2d_filter(
+    geom = "text_repel", keep.fraction = 0.1, size=3, 
+    arrow=arrow(angle=15, ends="first", length=unit(0.1, "inches")),
+    direction="both", force=1, min.segment.length=1, point.padding=.01,
+    nudge_y = .01
+  ) +   
+  ggtitle("Word Frequencies: Fox v.s. BBC") +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  geom_abline(color = "red") + theme_bw()
+```
+
+### New Zealand Coverage
+
+The words "zealand" and "mosque" are highlighted in the Fox News v.s. BBC plot. They are very likely referring to the [Christchurch mosque shootings](https://en.wikipedia.org/wiki/Christchurch_mosque_shootings) on March 15th. 
+
+Let's Check the coverages by station (word frequencies are normalized by the frequencies from Fox News):
+
+```{r}
+zealand_freq <- frequency.spread %>% filter(frequency.spread$word %in% c("mosque", "zealand", "shooting", "terror"))
+zealand_freq_normed <- zealand_freq %>% mutate_if(is.numeric, function(vec)(vec/zealand_freq$FOXNEWSW))
+zealand_freq_normed$FOXNEWSW_FREQ <- zealand_freq$FOXNEWSW
+datatable(zealand_freq_normed)  %>%  formatPercentage(c('BBCNEWS', 'CNNW', 'MSNBCW', 'FOXNEWSW'), 2)
+```
+
+It seems fox is the station that cover the NZ shottings least, and BCC the most. A time series analysis might uncover deeper patterns, but we'll leave that for a later section.
+
+A few samples:
+
+```{r}
+nz <- dt[grepl("new zealand",sapply(dt$text, tolower)), .(text, station)]
+datatable(nz[sample(1:nrow(nz), 20), .(station, text)])
+```
+
+## Distinctive Words
+
+There're some weird word that might be specific to a station or just plainly misspelled/misidentified. But we can already see some patterns here.
+
+
+CNN likes to mention names of a cities (e.g. "newyork", "losangeles", etc.). Fox News likes to mention "campus".
+
+```{r}
+word_ratios <- tidy_chyrons %>%
+  count(word, station) %>%
+  filter(sum(n) >= 10) %>%
+  ungroup() %>%
+  spread(station, n, fill = 0) %>%
+  mutate_if(is.numeric, funs((. + 1) / sum(. + 1)))
+
+fox_cnn_ratios <- word_ratios %>%
+  mutate(logratio = log(FOXNEWSW / CNNW)) %>%
+  arrange(desc(logratio))
+
+fox_cnn_ratios %>%
+  group_by(logratio < 0) %>%
+  top_n(15, abs(logratio)) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, logratio)) %>%
+  ggplot(aes(word, logratio, fill = logratio < 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  ylab("log odds ratio (FoxNews/CNN)") +
+  scale_fill_discrete(name = "", labels = c("FoxNews", "CNN")) + 
+  ggtitle("Most distinctive word: Fox News v.s. CNN") + 
+  theme_fivethirtyeight()
+```
+
+
+Fox News is really obsessive about representative [Alexandria Ocasio-Cortez](https://en.wikipedia.org/wiki/Alexandria_Ocasio-Cortez). BBC has some misspelled "mosque" -- "mosgue", "mosoue", "mosque".
+
+```{r}
+fox_bbc_ratios <- word_ratios %>%
+  mutate(logratio = log(FOXNEWSW / BBCNEWS)) %>%
+  arrange(desc(logratio))
+
+fox_bbc_ratios %>%
+  group_by(logratio < 0) %>%
+  top_n(15, abs(logratio)) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, logratio)) %>%
+  ggplot(aes(word, logratio, fill = logratio < 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  ylab("log odds ratio (FoxNews/BBC)") +
+  ggtitle("Most distinctive word: Fox News v.s. BBC") + 
+  scale_fill_discrete(name = "", labels = c("FoxNews", "BBC")) + 
+  theme_fivethirtyeight()
+```
+
+CNN is more obessed about [Mr. Kushner](https://en.wikipedia.org/wiki/Jared_Kushner) and probably his security clearance.
+
+```{r}
+cnn_bbc_ratios <- word_ratios %>%
+  mutate(logratio = log(CNNW / BBCNEWS)) %>%
+  arrange(desc(logratio))
+
+cnn_bbc_ratios %>%
+  group_by(logratio < 0) %>%
+  top_n(15, abs(logratio)) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, logratio)) %>%
+  ggplot(aes(word, logratio, fill = logratio < 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  ylab("log odds ratio (CNN/BBC)") +
+  ggtitle("Most distinctive word: CNN v.s. BBC") + 
+  scale_fill_discrete(name = "", labels = c("CNN", "BBC")) + 
+  theme_fivethirtyeight()
+```
+
