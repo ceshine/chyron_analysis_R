@@ -213,7 +213,7 @@ fox_cnn_ratios %>%
   coord_flip() +
   ylab("log odds ratio (FoxNews/CNN)") +
   scale_fill_discrete(name = "", labels = c("FoxNews", "CNN")) + 
-  ggtitle("Most distinctive word: Fox News v.s. CNN") + 
+  ggtitle("Most distinctive words: Fox News v.s. CNN") + 
   theme_fivethirtyeight()
 ```
 
@@ -234,7 +234,7 @@ fox_bbc_ratios %>%
   geom_col(show.legend = FALSE) +
   coord_flip() +
   ylab("log odds ratio (FoxNews/BBC)") +
-  ggtitle("Most distinctive word: Fox News v.s. BBC") + 
+  ggtitle("Most distinctive words: Fox News v.s. BBC") + 
   scale_fill_discrete(name = "", labels = c("FoxNews", "BBC")) + 
   theme_fivethirtyeight()
 ```
@@ -255,7 +255,7 @@ cnn_bbc_ratios %>%
   geom_col(show.legend = FALSE) +
   coord_flip() +
   ylab("log odds ratio (CNN/BBC)") +
-  ggtitle("Most distinctive word: CNN v.s. BBC") + 
+  ggtitle("Most distinctive words: CNN v.s. BBC") + 
   scale_fill_discrete(name = "", labels = c("CNN", "BBC")) + 
   theme_fivethirtyeight()
 ```
