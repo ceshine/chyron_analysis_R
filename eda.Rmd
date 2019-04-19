@@ -6,6 +6,11 @@ output:
     toc: yes
 ---
 
+Major Changelog:
+
+* Install rstudio/gt to make more presentable tables.
+* Unescape unicode characters, new lines, double quotes, etc. They were originally read in literally in escaped form. Should make the texts much cleaner.
+
 ## Introduction
 
 From [Third Eye Data](https://archive.org/details/third-eye):
@@ -36,8 +41,11 @@ library(ggpmisc)
 library(tidyverse)
 library(tidytext)
 library(lubridate)
+library(stringr)
+library(stringi)
 library(scales)
 library(DT)
+library(gt)
 # library(hrbrthemes)
 # hrbrthemes::import_roboto_condensed()
 ```
@@ -71,6 +79,16 @@ dt[, timestamp := parse_date_time(timestamp, 'ymd HMS')]
 dt[, date := date(timestamp)]
 ```
 
+Clean up the texts:
+
+```{r}
+# The trailing backslashes must be removed. Other wise stri_unescape_unicode will return NA.
+dt[, text := stri_unescape_unicode(str_replace_all(text, "\\\\+$", ""))]
+# Unify spacing characters
+dt[, text:= str_replace_all(text, "\\s+", " ")]
+```
+
+
 ## Basic Statistics
 
 A day has `60*60*24 = 86400` seconds. But understandably the total duration of chyrons won't sum up to that because of the commercials, the type of the program, or simply the errors of the OCR algorithm.
@@ -100,18 +118,16 @@ ggplot(dt.dailysum, aes(x = date, y=cnt, fill = station)) +
 
 ## Word Frequency Comparisons
 
-```{r}
-# replace_reg <- "http[s]?://[A-Za-z\\d/\\.]+|&amp;|&lt;|&gt;"
+Tokenization with tidytext:
+
+```{r results="hide"}
 tidy_chyrons <- dt %>%
-  # mutate(text = str_replace_all(text, replace_reg, "")) %>%
   unnest_tokens(
     word, text, token = "words") %>%
   filter(!word %in% stop_words$word, str_detect(word, "[a-z]"))
 ```
 
 The idea of using `stat_dens2d_filter` came from [here](https://github.com/slowkow/ggrepel/issues/17). 
-
-We can see some clear misspellings like "ntrump" and mishandled unicode characters "u00b0" in the plot:
 
 ```{r fig.width=8, fig.asp=1, results="hide", fig.keep=TRUE}
 frequency <- tidy_chyrons %>%
@@ -162,17 +178,41 @@ ggplot(frequency.spread %>% arrange(desc(BBCNEWS), desc(FOXNEWSW)), aes(BBCNEWS,
   geom_abline(color = "red") + theme_bw()
 ```
 
-### New Zealand Coverage
+### New Zealand Coverage - First Clues
 
 The words "zealand" and "mosque" are highlighted in the Fox News v.s. BBC plot. They are very likely referring to the [Christchurch mosque shootings](https://en.wikipedia.org/wiki/Christchurch_mosque_shootings) on March 15th. 
 
 Let's Check the coverages by station (word frequencies are normalized by the frequencies from Fox News):
 
 ```{r}
-zealand_freq <- frequency.spread %>% filter(frequency.spread$word %in% c("mosque", "zealand", "shooting", "terror"))
+zealand_freq <- frequency.spread %>% filter(frequency.spread$word %in% c("mosque", "zealand", "shootings", "terror"))
 zealand_freq_normed <- zealand_freq %>% mutate_if(is.numeric, function(vec)(vec/zealand_freq$FOXNEWSW))
 zealand_freq_normed$FOXNEWSW_FREQ <- zealand_freq$FOXNEWSW
-datatable(zealand_freq_normed)  %>%  formatPercentage(c('BBCNEWS', 'CNNW', 'MSNBCW', 'FOXNEWSW'), 2)
+# datatable(zealand_freq_normed)  %>%  formatPercentage(c('BBCNEWS', 'CNNW', 'MSNBCW', 'FOXNEWSW'), 2)
+gt_tbl <- gt(data = zealand_freq_normed, rowname_col = "word")
+gt_tbl %>% tab_header(
+    title = "Apperanace of Words Related to the New Zealand Shootings"
+  ) %>%
+  tab_spanner(
+    label = "Relative Frequencies",
+    columns = vars(BBCNEWS, CNNW, FOXNEWSW, MSNBCW)
+  ) %>% fmt_percent(
+    columns = vars(BBCNEWS, CNNW, FOXNEWSW, MSNBCW),
+    decimals = 1,
+    drop_trailing_zeros = F
+  ) %>% fmt_percent(
+    columns = vars(FOXNEWSW_FREQ),
+    decimals = 4,
+    drop_trailing_zeros = F
+  ) %>% cols_label(
+    FOXNEWSW_FREQ = "Freq@FoxNews",
+    BBCNEWS="BBC", CNNW="CNN", FOXNEWSW="FoxNews", MSNBCW="MSNBC"
+  ) %>%  tab_style(
+    style = cells_styles(
+      text_color="#AAA"),
+    locations = cells_data(
+      columns = vars(FOXNEWSW)
+  ))
 ```
 
 It seems fox is the station that cover the NZ shottings least, and BCC the most. A time series analysis might uncover deeper patterns, but we'll leave that for a later section.
@@ -257,6 +297,75 @@ cnn_bbc_ratios %>%
   ylab("log odds ratio (CNN/BBC)") +
   ggtitle("Most distinctive words: CNN v.s. BBC") + 
   scale_fill_discrete(name = "", labels = c("CNN", "BBC")) + 
+  theme_fivethirtyeight()
+```
+
+## New Zealand Coverage
+
+Now let's take a deeper look at how each station choose to cover the New Zealand shootings in their chyrons.
+
+### General Statistics
+
+Here we choose chyrons containing "New Zealand", "Mosque", and "Masscares" as related to the new zealand shottings.
+
+```{r}
+dt.nw <- dt[
+  grepl("(?:new zealand)|(?:mosque)|(?:masscares)\b", sapply(dt$text, tolower)) , 
+  .(text, station, duration, date=round_date(timestamp, "hour"))]
+dt.nw.stats <- merge(
+  dt.nw[, .(cnt=.N, duration=sum(duration)), by=c("station", "date")],
+  CJ(station = unique(dt.nw$station), date=seq(ymd_h('2019-03-15 00'), ymd_h('2019-03-17 23'), by="hour")),
+  by=c("date", "station"), all.y=T
+)
+dt.nw.stats <- merge(
+  dt.nw.stats, 
+  dt[,.(date=round_date(timestamp, "hour"), station, duration)][, .(t_cnt=.N, t_duration=sum(duration)), by=c("station", "date")],
+  by=c("station", "date")
+)
+dt.nw.stats[is.na(dt.nw.stats)] = 0
+dt.table.data <- dt.nw.stats[, .(
+  total_duration=sum(duration), duration_ratio=sum(duration) / sum(t_duration),
+  total_cnt=sum(cnt), cnt_ratio=sum(cnt) / sum(t_cnt)), by="station"]
+gt_tbl <- gt(data = dt.table.data, rowname_col = "station")
+gt_tbl %>% tab_header(
+    title = "Appearance oof Chyrons Related to NZ Shootings"
+  ) %>% tab_spanner(
+    label = "Duration (s)",
+    columns = vars(total_duration, duration_ratio)
+  ) %>% tab_spanner(
+    label = "Count",
+    columns = vars(total_cnt, cnt_ratio)
+  ) %>% fmt_percent(
+    columns = vars(duration_ratio, cnt_ratio),
+    decimals = 2,
+    drop_trailing_zeros = F
+  ) %>% cols_label(
+    cnt_ratio = "%",
+    duration_ratio = "%",
+    total_duration = "Total",
+    total_cnt = "Total"
+  ) %>% tab_source_note(
+    "Date Range: 2019/03/15 00:00 to 2019/03/17 23:59 (UTC)"
+  )
+```
+
+### Time Series
+
+```{r fig.asp=1, fig.width=8}
+time_interval <- "2 hours"
+dt.nw.stats[, smoothed_date := round_date(date, time_interval)]
+dt.nw.stats.smoothed <- dt.nw.stats[, .(cnt=sum(cnt), duration=sum(duration), t_cnt=sum(t_cnt), t_duration=sum(t_duration)), by=c("station", "smoothed_date")]
+ggplot(dt.nw.stats.smoothed, aes(x=smoothed_date, y=duration/t_duration * 100, fill=station)) + 
+  facet_wrap(~station, ncol = 1, scales = "fixed") +
+  ggtitle("% of Total Chyron Duration Related to NZ Shootings") +
+  geom_bar(stat="identity", show.legend=F) + theme_fivethirtyeight()
+```
+
+```{r fig.asp=1, fig.width=8}
+ggplot(dt.nw.stats.smoothed, aes(x=smoothed_date, y=cnt/t_cnt * 100, fill=station)) + 
+  facet_wrap(~station, ncol = 1, scales = "fixed") +
+  geom_bar(stat="identity", show.legend = F) + 
+  ggtitle("% of Chyrons Related to NZ Shootings") +
   theme_fivethirtyeight()
 ```
 
