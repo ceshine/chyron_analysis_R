@@ -1,6 +1,9 @@
 ---
-title: "Analyzing Chyrons"
-output: 
+title: "Analyzing Chyrons During March 2019"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
   html_notebook:
     theme: united
     toc: yes
@@ -64,12 +67,6 @@ Read the tsv files using data.table:
 ```{r echo=TRUE}
 dt <- rbindlist(lapply(files, fread, sep="\t", header=F, col.names=c("timestamp", "station", "duration", "id", "text")))
 datatable(head(dt))
-```
-
-Discard the clip id for now:
-
-```{r}
-dt[, id := NULL]
 ```
 
 convert timestamp:
@@ -299,6 +296,65 @@ cnn_bbc_ratios %>%
   scale_fill_discrete(name = "", labels = c("CNN", "BBC")) + 
   theme_fivethirtyeight()
 ```
+
+## Program Comparison
+
+We can identify the program using ths `id` column. Let's get chyrons from Fox and Friends and All In with Chris Hayes.
+
+```{r}
+dt.foxAndFriends <- dt[grepl("Fox_and_Friends", id), ]
+dt.foxAndFriends[, program := "Fox And Friends"]
+dt.hayes <- dt[grepl("Chris_Hayes", id), ]
+dt.hayes[, program := "Chris Hayes"]
+dt.subset <- rbind(dt.foxAndFriends, dt.hayes)
+dt.subset[, id:=NULL]
+dt.subset[, .N, by=program]
+```
+
+```{r}
+# Tidying the chyrons
+tidy_chyrons <- dt.subset %>%
+  unnest_tokens(
+    word, text, token = "words") %>%
+  filter(!word %in% stop_words$word, str_detect(word, "[a-z]"))
+
+frequency <- tidy_chyrons %>%
+  group_by(program) %>%
+  count(word, sort = TRUE) %>%
+  left_join(tidy_chyrons %>%
+              group_by(program) %>%
+              summarise(total = n())) %>%
+  mutate(freq = n/total)
+
+frequency.spread <- frequency %>%
+  select(program, word, freq) %>%
+  filter(freq > 0.0001) %>%
+  spread(program, freq) %>%
+  arrange(desc(`Fox And Friends`), desc(`Chris Hayes`))
+```
+
+
+```{r fig.width=8, fig.asp=1, results="hide", fig.keep=TRUE}
+# Manually add jitter
+frequency.spread.jitter <- frequency.spread %>% 
+  mutate(
+    `Chris Hayes`=`Chris Hayes` * runif(nrow(frequency.spread), 0.9, 1.1),
+    `Fox And Friends`=`Fox And Friends` * runif(nrow(frequency.spread), 0.9, 1.1)
+  )
+ggplot(frequency.spread.jitter, aes(`Chris Hayes`, `Fox And Friends`, label=word)) +
+  geom_point(alpha = 0.1, size = 1.5) +
+  stat_dens2d_filter(
+    geom = "text_repel", keep.fraction = 0.1, size=3, 
+    arrow=arrow(angle=15, ends="first", length=unit(0.1, "inches")),
+    direction="both", force=1, min.segment.length=1, point.padding=.01,
+    nudge_y = .01
+  ) + 
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  ggtitle("Word Frequencies: Fox & Friends  v.s. All In with Chris Hayes") +
+  geom_abline(color = "red") + theme_bw()
+```
+
 
 ## New Zealand Coverage
 
